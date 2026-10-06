@@ -237,6 +237,20 @@ class PureLogin:
         data_url = 'data:image/png;base64,' + base64.b64encode(png).decode()
         return {'ok': True, 'captcha_img': data_url, 'captcha_required': True}
 
+    def start_direct(self, phone: str):
+        """直接登录预备：只建立会话，不取图形码（login.htm 不校验图形码）。
+
+        用于"用户自己在手机上取码"的链路：发短信这一步发生在用户自己的
+        手机/网络（他自己的 IP），本站只负责用手机号+短信码完成登录。
+        """
+        self.phone = phone or self.phone
+        self.captcha_answer = ''
+        self.jar.clear()
+        st, _ = self._req(LOGIN_URL, timeout=25)
+        if st != 200:
+            return {'ok': False, 'err': f'登录页打开失败 HTTP {st}'}
+        return {'ok': True, 'phone': self.phone}
+
     def refresh_captcha(self):
         st, png = self._req_bytes(f'{LOGIN_HOST}/captchazh.htm?type=12&t={int(time.time()*1000)}')
         if st != 200 or not png:

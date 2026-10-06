@@ -587,6 +587,118 @@ def api_batch_use():
     return _attach_sid(jsonify(ok=True, phone=phone, count=len(items)), sid)
 
 
+# ---------------- 直登（用户自带验证码，本站不发码） ----------------
+#
+# 发短信这一步发生在用户自己的手机/网络上（他自己的 IP），本站只接收
+# 手机号 + 短信码完成登录。实测 login.htm 不校验图形码，所以这条路不需要
+# 图形码，也不需要本站发起任何短信请求 —— 从根上绕开"同一 IP 批量发码"风控。
+
+PHONE_CODE_RE = re.compile(r'^1\d{10}$')
+
+
+def _parse_pairs(raw) -> list[tuple[str, str]]:
+    """解析「手机号 验证码」列表，每行一条，支持空格/逗号/制表符分隔。"""
+    if isinstance(raw, str):
+        lines = raw.splitlines()
+    elif isinstance(raw, list):
+        lines = [str(x) for x in raw]
+    else:
+        lines = []
+    out, seen = [], set()
+    for line in lines:
+        parts = [p.strip() for p in re.split(r'[\s,，、;；|]+', line.strip()) if p.strip()]
+        if len(parts) < 2:
+            continue
+        phone = next((p for p in parts if PHONE_CODE_RE.match(p)), '')
+        code = next((p for p in parts if p != phone and p.isdigit() and 4 <= len(p) <= 8), '')
+        if phone and code and phone not in seen:
+            seen.add(phone)
+            out.append((phone, code))
+    return out
+
+
+def _direct_login(s: dict, phone: str, code: str, egress=None) -> dict:
+    """用手机号+短信码登录，成功后写入账号池。
+
+    egress 为空时用会话默认出口；批量场景会按号码各分一个出口，
+    避免一整批登录全从同一个 IP 出去。
+    """
+    lg = PureLogin(log=lambda *a: None, persist=False,
+                   egress=egress if egress is not None else s.get('egress'))
+    r = lg.start_direct(phone)
+    if not r.get('ok'):
+        return {'phone': phone, 'ok': False, 'err': r.get('err')}
+    out = lg.submit_code(code)
+    if not out.get('ok'):
+        return {'phone': phone, 'ok': False, 'err': out.get('err')}
+    try:
+        _accounts.upsert(phone, lg.cookie_items(), owner=s['uid'])
+    except Exception as e:      # noqa: BLE001
+        print('[accounts] direct save failed:', e)
+    return {'phone': phone, 'ok': True, 'login': lg}
+
+
+@app.route('/api/login/direct', methods=['POST'])
+def api_login_direct():
+    """本站不发码：用户自己在手机上取码，这里用手机号+短信码登录。"""
+    sid, s = _session()
+    d = request.get_json(force=True, silent=True) or {}
+    phone = (d.get('phone') or '').strip()
+    code = (d.get('code') or '').strip()
+    if not PHONE_CODE_RE.match(phone):
+        return _attach_sid(jsonify(ok=False, err='请输入 11 位手机号'), sid)
+    if not (code.isdigit() and 4 <= len(code) <= 8):
+        return _attach_sid(jsonify(ok=False, err='请输入收到的短信验证码'), sid)
+    if not _ip_allow(_client_ip()):
+        return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
+
+    r = _direct_login(s, phone, code)
+    if not r['ok']:
+        return _attach_sid(jsonify(ok=False, err=r['err']), sid)
+
+    s['login'], s['phone'] = r['login'], phone
+    s['items'], s['items_at'] = [], 0.0
+    try:
+        with s['lock']:
+            items = _items(s)
+        count = len(items)
+    except CmccAuthError as e:
+        return _attach_sid(jsonify(ok=False, err=f'登录成功但读取业务失败：{e}'), sid)
+    except Exception as e:      # noqa: BLE001
+        count = 0
+        print('[direct] list failed:', e)
+    resp = jsonify(ok=True, phone=phone, count=count)
+    _attach_sid(resp, sid)
+    resp.set_cookie(ACCOUNT_COOKIE, phone, max_age=180 * 86400, samesite='Lax')
+    return resp
+
+
+@app.route('/api/batch/direct', methods=['POST'])
+def api_batch_direct():
+    """批量直登：粘贴「手机号 验证码」多行，一次全部登录并入库。"""
+    sid, s = _session()
+    d = request.get_json(force=True, silent=True) or {}
+    pairs = _parse_pairs(d.get('lines'))
+    if not pairs:
+        return _attach_sid(jsonify(ok=False, err='没有识别到「手机号 验证码」组合'), sid)
+    pairs = pairs[:BATCH_MAX]
+    if not _ip_allow(_client_ip()):
+        return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
+
+    def work(item):
+        phone, code = item
+        eg = _pool.pick('%s|%s' % (s['uid'], phone))   # 每个号码一个出口
+        r = _direct_login(s, phone, code, egress=eg)
+        return {'phone': phone, 'ok': r['ok'], 'err': r.get('err') or ''}
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as ex:
+        for row in ex.map(work, pairs):
+            rows.append(row)
+    ok_n = sum(1 for r in rows if r['ok'])
+    return _attach_sid(jsonify(ok=True, rows=rows, ok_count=ok_n, total=len(rows)), sid)
+
+
 @app.route('/api/login/logout', methods=['POST'])
 def api_login_logout():
     sid, s = _session()
