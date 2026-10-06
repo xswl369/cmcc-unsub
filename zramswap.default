@@ -1,0 +1,10 @@
+# Compression algorithm selection
+# speed: lz4 > zstd > lzo
+# compression: zstd > lzo > lz4
+ALGO=zstd
+
+# 固定 700M zram：460M 物理内存跑 Chromium 必须靠交换空间避免 OOM
+SIZE=700
+
+# Specifies the priority for the swap devices, see swapon(2)
+PRIORITY=100

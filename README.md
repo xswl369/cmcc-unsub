@@ -1,0 +1,168 @@
+# 中国移动退订业务
+
+在低配 ARM 设备（460MB 内存）上运行的中国移动网上营业厅退订工具。**纯 HTTP 实现，不依赖任何浏览器。**
+
+## 为什么不用浏览器
+
+最初用 Playwright/CDP 驱动 Chromium 完成登录。实践中发现致命问题：
+
+- Chromium 常驻 4 个进程，占用 **360MB**，而设备总内存只有 460MB
+- 登录页的 FingerprintJS 设备指纹在软渲 ARM 上要算 60 秒以上，期间渲染进程被压死
+- 提交登录瞬间必然 OOM，渲染进程崩溃 → 登录态丢失
+- 表现为 `HTTP 524`（超过 Cloudflare 100s 上限）/ `HTTP 502`（watchdog 误判重启）
+
+**结论：在这类设备上，浏览器方案不可行。** 本项目把整条链路逆向后用纯 HTTP 复刻，内存占用从 360MB 降到 28MB。
+
+## 架构
+
+```
+访问者 ── HTTPS ──> Cloudflare ── Tunnel ──> 本机 nginx:5701
+                                                  │
+                                                  ▼
+                                        gunicorn (1 worker / 48 threads)
+                                                  │
+                              ┌───────────────────┼───────────────────┐
+                              ▼                   ▼                   ▼
+                        session A            session B           session C
+                    (PureLogin+出口A)    (PureLogin+出口B)   (PureLogin+出口C)
+                              │                   │                   │
+                              └───────────────────┴───────────────────┘
+                                                  │
+                                          中国移动 HTTP API
+```
+
+**多会话隔离**：每个访客一个 `sid`（HttpOnly cookie），各自独立的 cookie 容器、图形码、登录态。100 人同时使用互不干扰（实测 100 并发 p95 = 273ms）。
+
+**出口 IP 池**：解决"同一 IP 批量登录"风控。
+
+- B 方案：IPv6 源地址轮换。若设备有公网 IPv6 `/64`，可在段内生成多个源地址，绑定后出网 IP 各不相同（实测 4 个会话 → 4 个不同公网 IP）
+- C 方案：代理池。在 `data/ip_pool.json` 里填 SOCKS5/HTTP 代理，优先级高于 IPv6
+
+## 逆向要点
+
+登录链路的加密与流程（`pure_login.py`）：
+
+| 环节 | 实现 |
+|---|---|
+| 密码/手机号加密 | RSA PKCS#1 v1.5，公钥内嵌在 `login_qr_fun.js` 的 `et()` 函数里 |
+| 图形码获取 | `GET /captchazh.htm?type=12` |
+| 图形码校验 | `GET /verifyCaptcha.htm?inputCode=xxx`（必须是 **GET**，页面用 `$.getJSON`） |
+| 风控 token | `POST /loadToken.action` |
+| 发送短信 | `POST /sendRandomCodeAction.action`，带 `Xa-before: token` 头 |
+| 提交登录 | `POST /login.htm`，成功后跟随 `assertAcceptURL` 落 SSO cookie |
+
+业务接口（`core.py`）：AES-128-CBC（key = iv = 从页面源码取的常量字面量），双层 base64；`msgId` 需要 `sessionStorage.aqjg_cmcc_month`，在纯 HTTP 下改为调 `GET /v1/auth/loginfo` 取 `data.msgId`。
+
+## 部署
+
+### 1. 依赖
+
+```bash
+apt-get install -y python3 python3-pip nginx
+pip3 install flask gunicorn pycryptodome
+```
+
+### 2. 配置
+
+编辑 `config.ini`：
+
+```ini
+[cmcc]
+phone = 13800138000          ; 默认手机号
+port = 8686                  ; 内部端口
+access_token =               ; 留空=不启用访问口令
+```
+
+### 3. 启动
+
+```bash
+mkdir -p /opt/cmcc-unsub
+cp -r . /opt/cmcc-unsub/
+cd /opt/cmcc-unsub
+
+# 直接跑（调试）
+python3 -m gunicorn -c gunicorn.conf.py wsgi:app
+```
+
+### 4. systemd（生产）
+
+```bash
+cp cmcc.service /etc/systemd/system/cmcc-unsub.service
+systemctl enable --now cmcc-unsub
+```
+
+### 5. nginx
+
+参考 `nginx.conf`，把 `server_name` 换成自己的域名，反代到 `127.0.0.1:8686`。
+
+### 6. Cloudflare Tunnel（可选）
+
+```bash
+cp cloudflared-config.yml /etc/cloudflared/config.yml
+# 编辑 tunnel ID 与 credentials-file
+systemctl enable --now cloudflared
+```
+
+## 出口 IP 池配置
+
+`data/ip_pool.json`（不存在则用默认值）：
+
+```json
+{
+  "ipv6": {
+    "enabled": true,
+    "iface": "wlan0",
+    "prefix": "2001:db8:1234:5678::/64",
+    "count": 24,
+    "ttl": 1800
+  },
+  "proxies": [
+    "socks5://user:pass@1.2.3.4:1080",
+    "http://user:pass@5.6.7.8:8080"
+  ],
+  "strategy": "sid"
+}
+```
+
+- `strategy: sid` — 同一访客始终走同一出口（一致性哈希，会话更稳）
+- `strategy: round` — 轮询
+- 有 `proxies` 时**代理优先**，IPv6 作为兜底
+
+查看池状态：`GET /api/ip/status`
+
+## API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/` | 网页界面 |
+| GET | `/api/state` | 当前会话登录态 + 业务数 |
+| GET | `/api/busi` | 业务列表 |
+| GET | `/api/ip/status` | 出口池状态 |
+| POST | `/api/sms` | 发退订短信码 |
+| POST | `/api/unsub` | 提交退订 |
+| POST | `/api/login/start` | 取图形码（换账号） |
+| POST | `/api/login/send` | 图形码 + 发短信 |
+| POST | `/api/login/submit` | 短信码登录 |
+| POST | `/api/login/logout` | 退出 |
+
+## 已知限制
+
+**移动侧的限制，代码无法绕过：**
+
+1. **短信冷却按手机号计算** — 每个号码约 1 分钟才能发一次，密集操作会返回业务码 `1`（"请一分钟以后再试"），累计过量会较长时间锁定
+2. **同 IP 批量登录风控** — 同出口 IP 高频登录返回 `3007`。本项目用出口 IP 池 + 节流缓解，但根本解决需要多个真实出口
+3. **图形码有效期短** — 实测 2-3 分钟失效，需及时使用
+
+**服务端节流（已内置）：**
+
+- 同一会话 65 秒内不重复发码
+- 同一 IP 每分钟最多 6 次发码
+- 会话 TTL 40 分钟，上限 300 个
+
+## 免责声明
+
+本工具仅用于管理**本人名下**的中国移动业务。使用者需自行确保操作对象为本人账号，并遵守中国移动的服务条款与当地法律法规。作者不对任何滥用行为负责。
+
+## License
+
+MIT

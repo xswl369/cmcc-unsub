@@ -1,0 +1,20 @@
+[Unit]
+Description=CMCC Unsub Web (Flask via gunicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cmcc-unsub
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m gunicorn -c /opt/cmcc-unsub/gunicorn.conf.py wsgi:app
+Restart=always
+RestartSec=8
+MemoryHigh=290M
+MemoryMax=380M
+OOMPolicy=continue
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

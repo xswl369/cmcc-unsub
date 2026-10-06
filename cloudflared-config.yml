@@ -1,0 +1,11 @@
+tunnel: bcc52383-e04f-4f35-a75f-be9f442a851b
+credentials-file: /etc/cloudflared/creds.json
+protocol: quic
+ingress:
+  - hostname: example.com
+    service: http://localhost:5701
+  - hostname: www.example.com
+    service: http://localhost:5701
+  - hostname: app.example.com
+    service: http://localhost:5701
+  - service: http_status:404

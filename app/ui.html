@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>移动业务退订</title>
+<style>
+:root{--blue:#0a84d8;--blue-dark:#0768ad;--red:#d93025;--green:#188038;--amber:#b26a00;
+--bg:#eef1f6;--card:#fff;--line:#e2e6ec;--txt:#1b2430;--sub:#68737f;--shadow:0 1px 3px rgba(16,24,40,.06),0 4px 14px rgba(16,24,40,.05)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt)}
+
+/* ---------- 顶栏 ---------- */
+header{position:sticky;top:0;z-index:9;background:rgba(255,255,255,.92);backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--line);padding:11px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+header h1::before{content:"";width:20px;height:20px;border-radius:6px;background:linear-gradient(135deg,#0a84d8,#39b4ff);display:inline-block;flex:0 0 auto}
+.dot{width:9px;height:9px;border-radius:50%;background:#c3cad3;flex:0 0 auto;transition:.3s}
+.dot.on{background:#22c55e;box-shadow:0 0 0 3.5px #22c55e2e}
+.dot.off{background:var(--red);box-shadow:0 0 0 3.5px #d930252e}
+#state{font-size:12.5px;color:var(--sub)}
+header .sp{flex:1}
+
+button{font:inherit;cursor:pointer;border:none;border-radius:10px;padding:9px 15px;background:var(--blue);color:#fff;font-size:14px;font-weight:500;transition:filter .15s,transform .06s,box-shadow .15s;box-shadow:0 1px 2px rgba(10,132,216,.25)}
+button:hover{filter:brightness(1.07)}
+button:active{transform:scale(.98)}
+button:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
+button.ghost{background:#eef2f7;color:#2c3948;box-shadow:none;border:1px solid #e2e6ec}
+button.ghost:hover{background:#e6ebf2}
+button.danger{background:var(--red);box-shadow:0 1px 2px rgba(217,48,37,.25)}
+button.small{padding:7px 12px;font-size:13px;border-radius:9px}
+
+/* ---------- 主体 ---------- */
+main{padding:14px;max-width:1120px;margin:0 auto}
+#msg{padding:10px 13px;border-radius:10px;font-size:13px;margin-bottom:11px;display:none}
+#msg.err{display:block;background:#fdecea;color:#b3261e;border:1px solid #f5c6c2}
+#msg.ok{display:block;background:#e8f5e9;color:#1b5e20;border:1px solid #bfe3c0}
+
+#list{display:grid;gap:11px;grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 14px;display:flex;flex-direction:column;gap:9px;box-shadow:var(--shadow);transition:border-color .15s}
+.card:hover{border-color:#cfe0f0}
+.card .nm{font-weight:600;font-size:15px;line-height:1.35}
+.card .meta{font-size:12px;color:var(--sub);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:500;border:1px solid}
+.tag.ok{color:var(--green);border-color:#bfe3c0;background:#e8f5e9}
+.tag.no{color:var(--red);border-color:#f5c6c2;background:#fdecea}
+.tag.gray{color:#556;border-color:#dfe3e8;background:#f6f8fa}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+input.code{flex:1;min-width:112px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;font-size:15px;letter-spacing:2px;outline:none;transition:border-color .15s,box-shadow .15s;background:#fbfcfd}
+input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.12);background:#fff}
+.res{font-size:12.5px;border-radius:9px;padding:8px 10px;display:none;word-break:break-all;line-height:1.45}
+.res.err{display:block;background:#fdecea;color:#b3261e}
+.res.ok{display:block;background:#e8f5e9;color:#1b5e20}
+.res.wait{display:block;background:#e8f0fe;color:#1a56b0}
+.empty{text-align:center;color:var(--sub);padding:52px 10px;font-size:14px;line-height:2}
+.footer{text-align:center;color:#9aa2ad;font-size:11.5px;padding:18px 8px 28px;line-height:1.9}
+
+/* ---------- 登录面板 ---------- */
+#loginPanel{position:fixed;inset:0;background:rgba(15,23,42,.55);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:50;padding:16px;overflow:auto}
+#loginPanel.show{display:flex}
+.login-box{background:#fff;border-radius:18px;max-width:430px;width:100%;max-height:94vh;overflow:auto;padding:22px;box-shadow:0 20px 60px rgba(16,24,40,.28);animation:pop .22s ease}
+@keyframes pop{from{transform:scale(.96);opacity:.6}to{transform:scale(1);opacity:1}}
+.login-box h2{margin:0 0 6px;font-size:18px;font-weight:650;display:flex;align-items:center;gap:8px}
+.login-box h2 .x{margin-left:auto;cursor:pointer;color:#9aa2ad;font-size:20px;line-height:1;padding:2px 6px;border-radius:8px;font-weight:400}
+.login-box h2 .x:hover{background:#f1f4f8;color:#3a4655}
+.login-box .hint{font-size:12.5px;color:var(--sub);margin-bottom:16px;line-height:1.75;background:#f7f9fc;border:1px solid #eef2f7;border-radius:10px;padding:9px 12px}
+.field{margin-bottom:14px}
+.field label{display:flex;align-items:center;gap:6px;font-size:12.5px;color:#4a5663;margin-bottom:6px;font-weight:500}
+.field label .step{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:var(--blue);color:#fff;font-size:11px;font-weight:600;flex:0 0 auto}
+.field input{width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:10px;font-size:15px;outline:none;transition:border-color .15s,box-shadow .15s;background:#fbfcfd}
+.field input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.12);background:#fff}
+
+/* 图形码行：左图右输入 */
+.captcha-line{display:flex;gap:10px;align-items:center}
+.captcha-box{position:relative;flex:0 0 auto;width:168px;height:56px;border:1px solid var(--line);border-radius:10px;background:#f7f9fc;overflow:hidden;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:border-color .15s}
+.captcha-box:hover{border-color:#b9d4ea}
+.captcha-box img{width:100%;height:100%;object-fit:contain;display:block;image-rendering:pixelated}
+.captcha-box .loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#f7f9fc;color:#9aa2ad;font-size:12px;gap:6px}
+.captcha-box .spin{width:13px;height:13px;border:2px solid #d7dee6;border-top-color:var(--blue);border-radius:50%;animation:rot .7s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+.captcha-line input{flex:1;min-width:0}
+
+.login-actions{display:flex;gap:9px;margin-top:18px;flex-wrap:wrap}
+.login-actions button{flex:1;min-width:120px;padding:11px 14px}
+.login-actions.stack{flex-direction:column;margin-top:14px}
+.login-actions.stack button{width:100%}
+.login-status{font-size:12.5px;margin-top:12px;padding:10px 12px;border-radius:10px;display:none;line-height:1.6}
+.login-status.err{display:block;background:#fdecea;color:#b3261e;border:1px solid #f5c6c2}
+.login-status.ok{display:block;background:#e8f5e9;color:#1b5e20;border:1px solid #bfe3c0}
+.login-status.wait{display:block;background:#e8f0fe;color:#1a56b0;border:1px solid #c7dbf7}
+
+.divider{height:1px;background:var(--line);margin:16px 0}
+.foot-actions{display:flex;gap:8px;flex-wrap:wrap}
+.foot-actions button{flex:1;min-width:96px}
+
+@media (max-width:440px){
+  main{padding:10px}.card{padding:12px}#list{grid-template-columns:1fr}
+  .captcha-box{width:140px;height:50px}
+  .login-box{padding:18px}
+  header{padding:10px 12px}
+  header h1{font-size:15px}
+}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>移动业务退订</h1>
+  <span id="state">检测中…</span>
+  <span class="sp"></span>
+  <button class="ghost small" id="btn-refresh">刷新列表</button>
+  <button class="ghost small" id="btn-login">切换账号</button>
+</header>
+<main>
+  <div id="msg"></div>
+  <div id="list"><div class="empty">正在读取业务列表…</div></div>
+  <div class="footer">退订操作实时作用于当前登录手机号 · 每个动作均有确认弹窗 · 请谨慎操作</div>
+</main>
+
+<div id="loginPanel">
+  <div class="login-box">
+    <h2>切换账号 <span class="x" id="btnX">✕</span></h2>
+    <div class="hint">打开面板会自动退出当前账号并加载新图形码（为切换登录做准备）。流程：填手机号 → 填图形码答案 → 发送短信码 → 填短信码 → 登录。</div>
+
+    <div class="field">
+      <label><span class="step">1</span>手机号码</label>
+      <input id="loginPhone" inputmode="numeric" maxlength="11" placeholder="11 位手机号">
+    </div>
+
+    <div class="field">
+      <label><span class="step">2</span>图形验证码（算式答案）</label>
+      <div class="captcha-line">
+        <div class="captcha-box" id="captchaBox" title="点击刷新图形码">
+          <img id="captchaImg" alt="图形验证码">
+          <div class="loading" id="captchaLoading"><span class="spin"></span>加载中…</div>
+        </div>
+        <input id="loginCaptcha" inputmode="numeric" maxlength="6" placeholder="填答案">
+      </div>
+    </div>
+
+    <div class="login-actions stack">
+      <button id="btnSend"><span id="btnSendTxt">发送短信验证码</span></button>
+    </div>
+
+    <div class="field" id="smsField" style="margin-top:14px;display:none">
+      <label><span class="step">3</span>短信验证码</label>
+      <input id="loginSms" inputmode="numeric" maxlength="8" placeholder="手机收到的验证码">
+    </div>
+
+    <div class="login-actions stack">
+      <button id="btnSubmit">登录</button>
+    </div>
+
+    <div class="login-status" id="loginStatus"></div>
+
+    <div class="divider"></div>
+    <div class="foot-actions">
+      <button class="ghost small" id="btnReloadCaptcha">重拿图形码</button>
+      <button class="ghost small" id="btnCloseLogin">关闭</button>
+      <button class="danger small" id="btnLogout">退出登录</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let ITEMS = [];
+let captchaBusy = false;
+
+function showMsg(t, cls){ const m=$('#msg'); m.textContent=t; m.className=cls||''; }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function api(path, opt){
+  try {
+    const r = await fetch(path, opt);
+    try { return await r.json(); } catch(e){ return {ok:false, err:'响应解析失败 HTTP '+r.status}; }
+  } catch(e){ return {ok:false, err:'网络错误: '+e}; }
+}
+function loginStatus(t, cls){ const el=$('#loginStatus'); if(!t){el.className='login-status'; el.textContent=''; return;} el.textContent=t; el.className='login-status '+(cls||''); }
+function capLoading(on){ $('#captchaLoading').style.display = on ? 'flex' : 'none'; }
+
+// ---------- 状态 ----------
+async function loadState(){
+  const d = await api('/api/state');
+  const dot=$('#dot'), st=$('#state');
+  if (d.logged_in){
+    dot.className='dot on';
+    st.textContent='已登录 ' + (d.phone||'').replace(/(\d{3})\d{4}(\d{4})/,'$1****$2') + ' · ' + (d.count||0) + ' 项业务';
+    return true;
+  }
+  dot.className='dot off';
+  st.textContent = d.err ? ('未登录/会话失效：' + String(d.err).slice(0,60)) : '未登录';
+  return false;
+}
+
+// ---------- 列表 ----------
+function render(items){
+  ITEMS = items || [];
+  const box = $('#list');
+  if (!ITEMS.length){ box.innerHTML = '<div class="empty">没有读取到业务数据<br>请先点「切换账号」登录中国移动</div>'; return; }
+  box.innerHTML = ITEMS.map((b,i)=>{
+    const tag = b.isUnOrder === '01' ? '<span class="tag ok">可退订</span>'
+              : (b.isUnOrder === '02' ? '<span class="tag no">不可退/管控</span>' : '<span class="tag gray">' + esc(b.isUnOrder) + '</span>');
+    return '<div class="card" data-i="'+i+'">'
+      + '<div class="nm">'+esc(b.busiName)+'</div>'
+      + '<div class="meta">'+tag
+      + '<span>'+esc(b.busiCode)+'</span>'
+      + (b.busiFee?('<span>'+esc(b.busiFee)+'</span>'):'')
+      + '</div>'
+      + '<div class="row"><button class="small" onclick="sendSms('+i+')">发送短信验证码</button></div>'
+      + '<div class="row">'
+      + '<input class="code" inputmode="numeric" placeholder="短信验证码" maxlength="8" id="code-'+i+'">'
+      + '<button class="danger small" onclick="submitUnsub('+i+')">提交退订</button>'
+      + '</div>'
+      + '<div class="res" id="res-'+i+'"></div>'
+      + '</div>';
+  }).join('');
+}
+function setRes(i, t, cls){ const el=document.getElementById('res-'+i); if(!el) return; el.textContent=t; el.className='res '+(cls||''); }
+
+async function refresh(showInfo){
+  showMsg('');
+  const ok = await loadState();
+  if (!ok){
+    $('#list').innerHTML='<div class="empty">未登录或会话失效<br>正在重新登录…</div>';
+    boot();
+    return;
+  }
+  const d = await api('/api/busi');
+  if (!d.ok){ showMsg('读取业务失败：' + (d.err||'未知'), 'err'); return; }
+  render(d.items);
+  if (showInfo) showMsg('共 ' + d.items.length + ' 项业务', 'ok');
+}
+
+async function sendSms(i){
+  const b = ITEMS[i];
+  if (!confirm('向手机发送退订【' + b.busiName + '】的短信验证码？')) return;
+  setRes(i,'发送中…','wait');
+  const d = await api('/api/sms', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({busiCode:b.busiCode, busiName:b.busiName, confirm:'YES'})});
+  if (d.ok && d.accepted){ setRes(i,'短信已发送，请查看手机并填入验证码','ok'); }
+  else { setRes(i,'发送失败：' + (d.err || '未知'), 'err'); }
+}
+
+async function submitUnsub(i){
+  const b = ITEMS[i];
+  const code = (document.getElementById('code-'+i).value || '').trim();
+  if (!/^\d{4,8}$/.test(code)){ setRes(i,'请先填入短信验证码','err'); return; }
+  if (!confirm('确认退订【' + b.busiName + '】？\n验证码：' + code + '\n提交后立即生效，不可撤回。')) return;
+  setRes(i,'提交中…','wait');
+  const d = await api('/api/unsub', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({busiCode:b.busiCode, busiName:b.busiName, busiType:b.busiType, bizCode:b.bizCode,
+      spid:b.spid, smsCode:code, confirm:'YES'})});
+  if (d.ok && d.success){ setRes(i,'✔ 退订成功','ok'); }
+  else if (d.ok){ setRes(i,'✘ ' + (d.retCode||'') + ' ' + (d.retMsg||''),'err'); }
+  else { setRes(i,'✘ ' + (d.err||'提交失败'),'err'); }
+}
+
+// ---------- 登录 / 切换账号 ----------
+const panel = $('#loginPanel');
+let smsCountdown = 0;
+
+async function loadCaptcha(silent){
+  if (captchaBusy) return;
+  captchaBusy = true;
+  capLoading(true);
+  if (!silent) loginStatus('正在退出旧会话并加载图形码…','wait');
+  const phone = $('#loginPhone').value.trim();
+  const d = await api('/api/login/start', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone: /^1\d{10}$/.test(phone) ? phone : undefined})});
+  capLoading(false);
+  captchaBusy = false;
+  if (d.ok && d.captcha_img){
+    $('#captchaImg').src = d.captcha_img;
+    cooldownSend(3);  // 图形码就绪后短暂冷却，防手快
+    loginStatus('图形码已加载。填答案后点「发送短信验证码」。','ok');
+  } else {
+    loginStatus('图形码加载失败：' + (d.err||'未知') + '（点图重试）','err');
+  }
+}
+
+function cooldownSend(sec){
+  const btn = $('#btnSend');
+  const txt = $('#btnSendTxt');
+  smsCountdown = sec;
+  btn.disabled = true;
+  txt.textContent = sec > 0 ? ('发送短信验证码（' + sec + 's）') : '发送短信验证码';
+  if (sec <= 0){ btn.disabled = false; return; }
+  const t = setInterval(()=>{
+    smsCountdown--;
+    if (smsCountdown <= 0){
+      clearInterval(t); btn.disabled = false; txt.textContent = '发送短信验证码';
+    } else txt.textContent = '发送短信验证码（' + smsCountdown + 's）';
+  }, 1000);
+}
+
+function openLogin(){
+  panel.classList.add('show');
+  const p = $('#loginPhone');
+  if (!p.value) p.value = (JSON.parse(localStorage.getItem('cmcc_phone')||'""')) || '';
+  loginStatus('');
+  loadCaptcha();  // 自动加载图形码
+}
+$('#btn-login').onclick = openLogin;
+$('#btnCloseLogin').onclick = ()=>panel.classList.remove('show');
+$('#btnX').onclick = ()=>panel.classList.remove('show');
+$('#captchaBox').onclick = ()=>loadCaptcha(true);
+$('#btnReloadCaptcha').onclick = ()=>loadCaptcha(true);
+
+$('#btnSend').onclick = async ()=>{
+  const phone = $('#loginPhone').value.trim();
+  const captcha = $('#loginCaptcha').value.trim();
+  if (!/^1\d{10}$/.test(phone)){ loginStatus('请输入正确的手机号','err'); return; }
+  localStorage.setItem('cmcc_phone', JSON.stringify(phone));
+  if (!captcha){ loginStatus('请填写图形验证码答案','err'); return; }
+  $('#btnSend').disabled = true;
+  loginStatus('正在发送短信码…','wait');
+  const d = await api('/api/login/send', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone, captcha})});
+  if (d.ok){
+    $('#smsField').style.display='block';
+    loginStatus('短信已发送，请查看手机并填入短信验证码，再点「登录」。','ok');
+    cooldownSend(60);
+  } else {
+    $('#btnSend').disabled = false;
+    // 图形码答错时页面会自行换图，必须同步到前端，否则用户看着旧图重试
+    if (d.captcha_img){ $('#captchaImg').src = d.captcha_img; $('#loginCaptcha').value = ''; }
+    loginStatus('发送失败：' + (d.err||'未知') + (d.errs?(' ' + JSON.stringify(d.errs)):''),'err');
+  }
+};
+
+$('#btnSubmit').onclick = async ()=>{
+  const code = $('#loginSms').value.trim();
+  if (!code){ loginStatus('请填写短信验证码','err'); return; }
+  $('#btnSubmit').disabled = true;
+  loginStatus('正在提交登录…','wait');
+  const d = await api('/api/login/submit', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({code})});
+  $('#btnSubmit').disabled = false;
+  if (d.ok){
+    loginStatus('✔ 登录成功：' + (d.phone || '已登录'),'ok');
+    setTimeout(async ()=>{ panel.classList.remove('show'); await refresh(true); }, 900);
+  } else {
+    loginStatus('登录失败：' + (d.err||'未知') + (d.errs?(' ' + JSON.stringify(d.errs)):''),'err');
+  }
+};
+
+$('#btnLogout').onclick = async ()=>{
+  if (!confirm('确认退出当前登录账号？')) return;
+  loginStatus('正在退出…','wait');
+  await api('/api/login/logout', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  loginStatus('已退出。点「重拿图形码」可登录新账号。','ok');
+  await loadState();
+};
+
+$('#btn-refresh').onclick = ()=>refresh(true);
+
+// 打开页面：已登录→直接进已登录界面；未登录→自动弹出登录面板（等同点「切换账号」）
+async function boot(){
+  const ok = await loadState();
+  if (ok){ await refresh(false); return; }
+  $('#list').innerHTML = '<div class="empty">正在准备登录…</div>';
+  panel.classList.add('show');
+  const p = $('#loginPhone');
+  if (!p.value) p.value = (JSON.parse(localStorage.getItem('cmcc_phone')||'""')) || '';
+  loginStatus('');
+  capLoading(true);
+  loginStatus('正在加载图形码…','wait');
+  const d = await api('/api/login/auto', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  capLoading(false);
+  if (d.logged_in){ await boot(); return; }
+  if (d.ok && d.captcha_img){
+    $('#captchaImg').src = d.captcha_img;
+    cooldownSend(3);
+    loginStatus('图形码已加载。填答案后点「发送短信验证码」。','ok');
+  } else {
+    loginStatus('图形码加载失败：' + (d.err||'未知') + '（点图重试）','err');
+  }
+}
+
+boot();
+</script>
+</body>
+</html>
