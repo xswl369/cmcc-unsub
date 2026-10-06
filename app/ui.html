@@ -108,6 +108,7 @@ input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.
   <span id="state">检测中…</span>
   <span class="sp"></span>
   <button class="ghost small" id="btn-refresh">刷新列表</button>
+  <button class="ghost small" id="btn-accounts">账号池</button>
   <button class="ghost small" id="btn-login">切换账号</button>
 </header>
 <main>
@@ -118,6 +119,12 @@ input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.
 
 <div id="loginPanel">
   <div class="login-box">
+    <div id="poolPanel" style="display:none;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><strong>账号池</strong>
+      <span style="font-size:12px;color:#68737f">点「使用」直接切号，无需再收短信</span></div>
+      <div id="poolList" style="display:flex;flex-direction:column;gap:8px"></div>
+      <div class="divider"></div>
+    </div>
     <h2>切换账号 <span class="x" id="btnX">✕</span></h2>
     <div class="hint">打开面板会自动退出当前账号并加载新图形码（为切换登录做准备）。流程：填手机号 → 填图形码答案 → 发送短信码 → 填短信码 → 登录。</div>
 
@@ -151,6 +158,17 @@ input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.
     </div>
 
     <div class="login-status" id="loginStatus"></div>
+
+    <div class="divider"></div>
+    <div class="hint" style="margin-bottom:10px">批量登录：每行一个手机号，逐个填图形码 → 发短信 → 填短信码。各号码互不影响，登录成功即入账号池。</div>
+    <div class="field">
+      <label>批量手机号（每行一个，最多 20 个）</label>
+      <textarea id="batchPhones" rows="4" style="width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:10px;font-size:14px;outline:none;background:#fbfcfd;font-family:inherit" placeholder="13800000001&#10;13800000002"></textarea>
+    </div>
+    <div class="login-actions stack">
+      <button id="btnBatchStart">生成批量登录表</button>
+    </div>
+    <div id="batchList" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div>
 
     <div class="divider"></div>
     <div class="foot-actions">
@@ -352,6 +370,111 @@ $('#btnLogout').onclick = async ()=>{
 };
 
 $('#btn-refresh').onclick = ()=>refresh(true);
+
+// ---------- 账号池 ----------
+async function loadAccounts(){
+  const d = await api('/api/accounts');
+  if (!d.ok) return [];
+  const box = $('#poolList');
+  if (!d.accounts.length){
+    box.innerHTML = '<div style="color:#68737f;font-size:13px">还没有已登录账号。完成一次登录后会自动入池。</div>';
+    return [];
+  }
+  box.innerHTML = d.accounts.map(a =>
+    '<div style="display:flex;gap:8px;align-items:center;padding:9px 10px;border:1px solid var(--line);border-radius:10px">'
+    + '<span style="font-size:14px;font-weight:600">' + esc(a.phone) + '</span>'
+    + '<span style="font-size:11.5px;color:#68737f">' + new Date(a.updated_at*1000).toLocaleString() + '</span>'
+    + '<span style="flex:1"></span>'
+    + '<button class="small" onclick="useAccount(\'' + a.raw + '\')">使用</button>'
+    + '<button class="ghost small" onclick="delAccount(\'' + a.raw + '\')">移除</button>'
+    + '</div>').join('');
+  return d.accounts;
+}
+async function useAccount(phone){
+  const d = await api('/api/accounts/use', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone})});
+  if (!d.ok){ showMsg('切换失败：' + (d.err||'未知'), 'err'); return; }
+  showMsg('已切到 ' + phone + '（' + d.count + ' 项业务）', 'ok');
+  panel.classList.remove('show');
+  await refresh(false);
+}
+async function delAccount(phone){
+  if (!confirm('从账号池移除 ' + phone + '？')) return;
+  await api('/api/accounts/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone})});
+  loadAccounts();
+}
+$('#btn-accounts').onclick = async ()=>{
+  panel.classList.add('show');
+  $('#poolPanel').style.display = 'block';
+  await loadAccounts();
+};
+
+// ---------- 批量登录 ----------
+function batchRow(r){
+  const st = {ready:['图形码已就绪','gray'], sent:['短信已发送','wait'],
+              done:['已登录','ok'], error:['出错','err']}[r.state] || ['','gray'];
+  let html = '<div class="batch-row" data-phone="' + r.phone + '" style="border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px">'
+    + '<div style="display:flex;align-items:center;gap:8px"><strong>' + esc(r.phone) + '</strong>'
+    + '<span class="tag ' + st[1] + '">' + st[0] + '</span>'
+    + '<span style="flex:1"></span>'
+    + '<button class="ghost small batch-refresh">重拿图形码</button></div>';
+  if (r.state !== 'done'){
+    html += '<div class="captcha-line">'
+      + '<div class="captcha-box" style="width:140px;height:48px"><img alt="" src="' + (r.captcha_img||'') + '"></div>'
+      + '<input class="batch-cap" inputmode="numeric" maxlength="6" placeholder="图形码答案">'
+      + '<button class="small batch-send">发短信</button></div>'
+      + '<div class="row"><input class="batch-code" inputmode="numeric" maxlength="8" placeholder="短信验证码">'
+      + '<button class="batch-submit">提交登录</button></div>';
+  }
+  if (r.err) html += '<div class="login-status err" style="display:block">' + esc(r.err) + '</div>';
+  html += '</div>';
+  return html;
+}
+function renderBatch(rows){
+  $('#batchList').innerHTML = (rows||[]).map(batchRow).join('');
+  document.querySelectorAll('#batchList .batch-row').forEach(row => {
+    const phone = row.dataset.phone;
+    row.querySelector('.batch-refresh').onclick = async ()=>{
+      const d = await api('/api/batch/refresh', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({phone})});
+      const im = row.querySelector('img');
+      if (d.ok && im){ im.src = d.row.captcha_img; const c = row.querySelector('.batch-cap'); if (c) c.value=''; }
+      else loginStatus('重拿图形码失败：' + (d.err||'未知'), 'err');
+    };
+    row.querySelector('.batch-send').onclick = async ()=>{
+      const cap = row.querySelector('.batch-cap').value.trim();
+      if (!cap){ loginStatus('请填图形码答案','err'); return; }
+      const d = await api('/api/batch/send', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({phone, captcha:cap})});
+      if (d.ok) loginStatus('短信已发送给 ' + phone, 'ok');
+      else loginStatus('发送失败：' + (d.err||'未知'), 'err');
+      if (d.row && d.row.captcha_img) { const im = row.querySelector('img'); if (im) im.src = d.row.captcha_img; }
+    };
+    row.querySelector('.batch-submit').onclick = async ()=>{
+      const code = row.querySelector('.batch-code').value.trim();
+      if (!code){ loginStatus('请填短信验证码','err'); return; }
+      const d = await api('/api/batch/submit', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({phone, code})});
+      if (d.ok){
+        loginStatus(phone + ' 登录成功，已入账号池', 'ok');
+        row.querySelector('.tag').textContent = '已登录';
+        row.querySelector('.tag').className = 'tag ok';
+        row.querySelectorAll('.captcha-line,.row').forEach(el => el.remove());
+      } else loginStatus(phone + ' 登录失败：' + (d.err||'未知'), 'err');
+    };
+  });
+}
+$('#btnBatchStart').onclick = async ()=>{
+  const phones = $('#batchPhones').value.trim();
+  if (!phones){ loginStatus('请粘贴手机号','err'); return; }
+  loginStatus('正在为每个号码建立独立会话并取图形码…','wait');
+  const d = await api('/api/batch/start', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phones})});
+  if (!d.ok){ loginStatus('失败：' + (d.err||'未知'),'err'); return; }
+  renderBatch(d.rows);
+  loginStatus('已生成 ' + d.rows.length + ' 个号码的登录表，逐个填图形码并发送短信。','ok');
+};
 
 // 打开页面：已登录→直接进已登录界面；未登录→自动弹出登录面板（等同点「切换账号」）
 async function boot(){

@@ -119,7 +119,8 @@ def et(plain: str) -> str:
 class PureLogin:
     """纯 HTTP 登录会话。cookies 持久化到文件，供业务接口复用。"""
 
-    def __init__(self, log=print, persist=True, cookie_file=None, egress=None):
+    def __init__(self, log=print, persist=True, cookie_file=None, egress=None,
+                 cookie_items=None):
         self.log = log
         self.persist = persist
         self.cookie_file = Path(cookie_file) if cookie_file else COOKIE_FILE
@@ -133,6 +134,8 @@ class PureLogin:
             elif getattr(egress, 'src_addr', ''):
                 handlers.append(_BindHTTPSHandler(egress.src_addr))    # B：源地址
         self.opener = urllib.request.build_opener(*handlers)
+        if cookie_items:                      # 从账号池恢复登录态
+            self.set_cookies(cookie_items)
         self.phone = ''
         self.token = ''
         self.captcha_answer = ''
@@ -191,6 +194,27 @@ class PureLogin:
     def cookie_header(self, domains=('.10086.cn', 'shop.10086.cn',
                                      '.shop.10086.cn', 'login.10086.cn')) -> str:
         return '; '.join(f'{c.name}={c.value}' for c in self.jar if c.domain in domains)
+
+    def cookie_items(self) -> list:
+        """导出 cookie 四元组供账号池持久化。"""
+        return [{'name': c.name, 'value': c.value, 'domain': c.domain,
+                 'path': c.path} for c in self.jar]
+
+    def set_cookies(self, items: list) -> None:
+        """从账号池恢复 cookie（登录态复用的唯一通道）。"""
+        for it in items or []:
+            try:
+                name, value = str(it['name']), str(it['value'])
+                domain = str(it.get('domain') or '.10086.cn')
+                path = str(it.get('path') or '/')
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.jar.set_cookie(http.cookiejar.Cookie(
+                version=0, name=name, value=value, port=None, port_specified=False,
+                domain=domain, domain_specified=True,
+                domain_initial_dot=domain.startswith('.'),
+                path=path, path_specified=True, secure=True, expires=None,
+                discard=False, comment=None, comment_url=None, rest={}))
 
     def sso_ready(self) -> bool:
         names = {c.name for c in self.jar}

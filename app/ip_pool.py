@@ -48,6 +48,51 @@ def _run(cmd):
         return ''
 
 
+def _rc(cmd) -> int:
+    """执行命令只要返回码；任何环境错误都当成失败，绝不向上抛。"""
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=10).returncode
+    except Exception:
+        return 1
+
+
+def _addr_change(action: str, addr: str, iface: str) -> int:
+    """增删 IPv6 地址：先直接执行，被拒绝就借 su 再试一次。"""
+    cmd = ['ip', '-6', 'addr', action, '%s/64' % addr, 'dev', iface]
+    rc = _rc(cmd)
+    if rc == 0:
+        return 0
+    return _rc(['su', '-c', ' '.join(cmd)])
+
+
+# 不可作出口的 IPv6 前缀：文档段 / ULA / 链路本地 / 组播
+_BAD_V6 = ('2001:db8:', 'fc', 'fd', 'fe80:', 'ff')
+
+
+def _routable_v6(addr: str) -> bool:
+    try:
+        ip = ipaddress.IPv6Address(addr)
+    except Exception:
+        return False
+    if ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_loopback:
+        return False
+    low = addr.lower()
+    return not any(low.startswith(p) for p in ('2001:db8:', 'fe80:', 'ff'))
+
+
+def _existing_global(iface: str):
+    """网卡上可用的公网 IPv6（过滤文档段等不可路由地址）。"""
+    out = []
+    for line in _run(['ip', '-6', 'addr', 'show', 'dev', iface, 'scope', 'global']).splitlines():
+        line = line.strip()
+        if not line.startswith('inet6 '):
+            continue
+        addr = line.split()[1].split('/')[0]
+        if _routable_v6(addr):
+            out.append(addr)
+    return out
+
+
 def _load_cfg():
     cfg = json.loads(json.dumps(DEFAULT_CFG))
     try:
@@ -114,8 +159,8 @@ class IPPool:
             return []
         iface = v6.get('iface') or 'wlan0'
         prefix = _detect_ipv6_prefix(iface) or v6.get('prefix') or ''
-        if not prefix:
-            self.log('[ippool] 无公网 IPv6 前缀，跳过 B 方案')
+        if not _routable_v6(prefix.split('/')[0]):
+            self.log('[ippool] 前缀不可路由(%s)，跳过 B 方案' % prefix)
             return []
         try:
             net = ipaddress.IPv6Network(prefix, strict=False)
@@ -124,15 +169,21 @@ class IPPool:
 
         base = net.network_address.exploded.rsplit(':', 3)[0]
         out = []
+
+        # 1) 先吃网卡上已经存在的公网地址（boot 脚本会预置一批）
+        for i, addr in enumerate(_existing_global(iface)):
+            out.append(Egress('v6-p%d' % i, src_addr=addr, iface=iface))
+
+        # 2) 不够再自己追加（本地 root / su 可用时）
         n = max(1, min(int(v6.get('count') or 16), 200))
-        for i in range(n):
+        for i in range(n - len(out)):
             rnd = int.from_bytes(os.urandom(6), 'big') or (i + 2)
             addr = str(ipaddress.IPv6Address(
                 '%s:%x:%x:%x' % (base, rnd >> 32 & 0xffff,
                                  rnd >> 16 & 0xffff, rnd & 0xffff)))
-            if subprocess.run(['ip', '-6', 'addr', 'add', '%s/64' % addr, 'dev', iface],
-                              capture_output=True).returncode == 0:
-                self._added_addrs.append(addr)
+            if _addr_change('add', addr, iface) != 0:
+                break             # 没有权限就停下，用现有地址继续
+            self._added_addrs.append(addr)
             out.append(Egress('v6-%d' % i, src_addr=addr, iface=iface))
 
         # 等 DAD 校验完成：tentative 地址绑定会报 EADDRNOTAVAIL(99)
@@ -177,8 +228,7 @@ class IPPool:
         with _lock:
             iface = self.cfg['ipv6'].get('iface', 'wlan0')
             for addr in self._added_addrs:
-                subprocess.run(['ip', '-6', 'addr', 'del', '%s/64' % addr, 'dev', iface],
-                               capture_output=True)
+                _addr_change('del', addr, iface)
             self._added_addrs = []
             self._egresses = self._build_ipv6() + self._build_proxies()
             self._built_at = time.time()
