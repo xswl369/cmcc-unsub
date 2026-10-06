@@ -53,6 +53,12 @@
 登录成功后 cookie 以手机号为键写入 `data/accounts_pool.json`。之后点「账号池 →
 使用」直接恢复登录态（`POST /api/accounts/use`），不发短信、不填验证码。
 
+> **账号池是按访客隔离的。** 每个浏览器首次访问会拿到一个 HttpOnly 的
+> `cmcc_uid`（180 天），账号池里的每条记录都带 `owner`。列表 / 使用 / 删除
+> 三个接口都会校验 `owner`：别人的号码在你这里等同于不存在（列表为空，
+> 使用和删除返回失败）。同一台设备的同一浏览器才能看到自己的账号；
+> 换浏览器 / 无痕窗口 / 清 cookie 后看不到原账号（需要重新登录一次）。
+
 **3. 按号码节流 + 多出口**
 
 - 短信冷却按手机号跨会话共享（同一号码 55 秒内只发一次）
@@ -67,7 +73,7 @@
 | `POST /api/batch/refresh` | 单号码重拿图形码，不影响其它号码 |
 | `POST /api/batch/send` | 单号码发短信（图形码 + 风控 token 在它自己的会话里） |
 | `POST /api/batch/submit` | 提交短信码，成功即写入账号池 |
-| `GET  /api/accounts` | 账号池列表 |
+| `GET  /api/accounts` | 账号池列表（只返回本人的） |
 | `POST /api/accounts/use` | 直接切到池中账号（免收码） |
 | `POST /api/accounts/delete` | 从池中移除账号 |
 

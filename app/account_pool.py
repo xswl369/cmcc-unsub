@@ -49,6 +49,7 @@ class AccountPool:
                 if not isinstance(cookies, list) or not cookies:
                     continue
                 self._accounts[phone] = {
+                    'owner': str(item.get('owner') or ''),   # 空 = 历史遗留，默认不对外可见
                     'cookies': cookies,
                     'note': str(item.get('note') or ''),
                     'updated_at': float(item.get('updated_at') or 0),
@@ -65,33 +66,50 @@ class AccountPool:
 
     # ---------- 访问 ----------
 
-    def upsert(self, phone: str, cookies: list[dict], note: str = '') -> dict:
+    def upsert(self, phone: str, cookies: list[dict], owner: str,
+               note: str = '') -> dict:
+        """写入/更新一个账号；owner 是该账号的归属访客身份。"""
         if not PHONE_RE.match(phone or ''):
             raise ValueError('invalid phone')
-        item = {'cookies': cookies, 'note': note,
+        if not owner:
+            raise ValueError('owner required')
+        item = {'owner': owner, 'cookies': cookies, 'note': note,
                 'updated_at': time.time()}
         with self._lock:
             self._accounts[phone] = item
         self.save()
         return item
 
-    def get(self, phone: str) -> dict | None:
+    def get(self, phone: str, owner: str) -> dict | None:
+        """只有归属者能取到；别人的号码一律当作不存在。"""
         with self._lock:
-            return self._accounts.get(phone)
+            item = self._accounts.get(phone)
+        if item and owner and item.get('owner') == owner:
+            return item
+        return None
 
-    def remove(self, phone: str) -> bool:
+    def remove(self, phone: str, owner: str) -> bool:
         with self._lock:
-            existed = self._accounts.pop(phone, None) is not None
-        if existed:
-            self.save()
-        return existed
+            item = self._accounts.get(phone)
+            if not item or not owner or item.get('owner') != owner:
+                return False
+            self._accounts.pop(phone, None)
+        self.save()
+        return True
 
-    def all(self) -> list[dict]:
+    def all(self, owner: str) -> list[dict]:
+        """只返回该 owner 自己的账号。"""
         with self._lock:
-            items = [dict(phone=p, **v) for p, v in self._accounts.items()]
+            items = [dict(phone=p, **v) for p, v in self._accounts.items()
+                     if v.get('owner') == owner and owner]
         return sorted(items, key=lambda x: x['updated_at'], reverse=True)
 
-    def summary(self) -> list[dict]:
+    def summary(self, owner: str) -> list[dict]:
         return [{'phone': masked(it['phone']), 'raw': it['phone'],
                  'updated_at': int(it['updated_at']), 'note': it['note']}
-                for it in self.all()]
+                for it in self.all(owner)]
+
+    def count_all(self) -> int:
+        """全站账号总数（只给运维看，不暴露归属与号码）。"""
+        with self._lock:
+            return len(self._accounts)

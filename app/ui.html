@@ -121,7 +121,7 @@ input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.
   <div class="login-box">
     <div id="poolPanel" style="display:none;margin-bottom:14px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><strong>账号池</strong>
-      <span style="font-size:12px;color:#68737f">点「使用」直接切号，无需再收短信</span></div>
+      <span style="font-size:12px;color:#68737f">仅本机浏览器可见 · 点「使用」直接切号，无需再收短信</span></div>
       <div id="poolList" style="display:flex;flex-direction:column;gap:8px"></div>
       <div class="divider"></div>
     </div>
@@ -377,7 +377,7 @@ async function loadAccounts(){
   if (!d.ok) return [];
   const box = $('#poolList');
   if (!d.accounts.length){
-    box.innerHTML = '<div style="color:#68737f;font-size:13px">还没有已登录账号。完成一次登录后会自动入池。</div>';
+    box.innerHTML = '<div style="color:#68737f;font-size:13px">本机还没有已登录账号。完成一次登录后会自动存入本机账号池；其它访客看不到你的号码。</div>';
     return [];
   }
   box.innerHTML = d.accounts.map(a =>

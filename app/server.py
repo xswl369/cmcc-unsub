@@ -55,6 +55,8 @@ UI = (Path(__file__).parent / 'ui.html').read_text(encoding='utf-8')
 
 SESSION_COOKIE = 'cmcc_sid'
 ACCOUNT_COOKIE = 'cmcc_acct'     # 记住最近使用过的手机号（仅本机浏览器）
+VISITOR_COOKIE = 'cmcc_uid'      # 访客身份：账号池归属与隔离的依据
+VISITOR_TTL = 180 * 86400        # 180 天
 SESSION_TTL = 40 * 60          # 40 分钟无操作即回收
 SESSION_MAX = 300              # 最多保留 300 个活跃会话
 _sessions: 'OrderedDict[str, dict]' = OrderedDict()
@@ -74,13 +76,17 @@ def _gc_locked() -> None:
 def _session() -> tuple[str, dict]:
     """取（或新建）当前访客的会话；无 cookie 时由调用方负责下发。"""
     sid = request.cookies.get(SESSION_COOKIE) or ''
+    uid = (request.cookies.get(VISITOR_COOKIE) or '').strip()
     with _sess_lock:
         _gc_locked()
         s = _sessions.get(sid) if sid else None
         if s is None:
             sid = secrets.token_urlsafe(18)
             egress = _pool.pick(sid)       # 每个访客一个出口（B/C 方案）
+            if not uid:
+                uid = secrets.token_urlsafe(24)
             s = {
+                'uid': uid,               # 账号池归属：别人的账号本访客看不到
                 'egress': egress,
                 'login': PureLogin(log=lambda *a: None, persist=False,
                                    egress=egress),
@@ -115,6 +121,11 @@ _phone_send_at: dict[str, float] = {}
 def _attach_sid(resp, sid: str):
     resp.set_cookie(SESSION_COOKIE, sid, max_age=SESSION_TTL,
                     httponly=True, samesite='Lax')
+    with _sess_lock:
+        uid = (_sessions.get(sid) or {}).get('uid')
+    if uid:
+        resp.set_cookie(VISITOR_COOKIE, uid, max_age=VISITOR_TTL,
+                        httponly=True, samesite='Lax')
     return resp
 
 
@@ -300,7 +311,7 @@ def api_accounts():
     """账号池：已登录过的手机号（cookie 复用，无需重新收码）。"""
     sid, s = _session()
     cur = s['phone']
-    return _attach_sid(jsonify(ok=True, accounts=_accounts.summary(),
+    return _attach_sid(jsonify(ok=True, accounts=_accounts.summary(s['uid']),
                                current=cur if s['login'].sso_ready() else ''), sid)
 
 
@@ -310,7 +321,7 @@ def api_accounts_use():
     sid, s = _session()
     d = request.get_json(force=True, silent=True) or {}
     phone = (d.get('phone') or '').strip()
-    item = _accounts.get(phone)
+    item = _accounts.get(phone, s['uid'])
     if not item:
         return _attach_sid(jsonify(ok=False, err='账号池里没有这个号码'), sid)
     lg = PureLogin(log=lambda *a: None, persist=False, egress=s.get('egress'),
@@ -321,7 +332,7 @@ def api_accounts_use():
         with s['lock']:
             items = _items(s)
     except CmccAuthError as e:
-        _accounts.remove(phone)
+        _accounts.remove(phone, s['uid'])
         return _attach_sid(jsonify(ok=False, err=f'登录态已失效：{e}'), sid)
     except Exception as e:
         return _attach_sid(jsonify(ok=False, err=str(e)[:150]), sid)
@@ -336,7 +347,7 @@ def api_accounts_delete():
     sid, s = _session()
     d = request.get_json(force=True, silent=True) or {}
     phone = (d.get('phone') or '').strip()
-    return _attach_sid(jsonify(ok=_accounts.remove(phone)), sid)
+    return _attach_sid(jsonify(ok=_accounts.remove(phone, s['uid'])), sid)
 
 
 @app.route('/api/login/auto', methods=['POST'])
@@ -400,7 +411,7 @@ def api_login_submit():
         s['phone'] = phone
         s['items'], s['items_at'] = [], 0.0
         try:                       # 登录成功 → 落账号池，之后免验证码直接切号
-            _accounts.upsert(phone, s['login'].cookie_items())
+            _accounts.upsert(phone, s['login'].cookie_items(), owner=s['uid'])
         except Exception as e:     # noqa: BLE001
             print('[accounts] save failed:', e)
     resp = jsonify(**r)
@@ -540,7 +551,7 @@ def api_batch_submit():
     if r.get('ok'):
         item['state'], item['err'] = 'done', ''
         try:
-            _accounts.upsert(phone, item['login'].cookie_items())
+            _accounts.upsert(phone, item['login'].cookie_items(), owner=s['uid'])
         except Exception as e:     # noqa: BLE001
             print('[accounts] batch save failed:', e)
     else:
@@ -560,7 +571,7 @@ def api_batch_use():
     phone = (d.get('phone') or '').strip()
     item = s['batch'].get(phone)
     if not item or item.get('state') != 'done':
-        acc = _accounts.get(phone)
+        acc = _accounts.get(phone, s['uid'])
         if not acc:
             return _attach_sid(jsonify(ok=False, err='该号码尚未登录成功'), sid)
         s['login'] = PureLogin(log=lambda *a: None, persist=False,
@@ -581,7 +592,7 @@ def api_login_logout():
     sid, s = _session()
     phone = s['phone']
     if phone and not (request.get_json(force=True, silent=True) or {}).get('keep'):
-        _accounts.remove(phone)     # 主动退出 = 把该号码移出账号池
+        _accounts.remove(phone, s['uid'])     # 主动退出 = 把该号码移出账号池
     s['login'].logout()
     with _sess_lock:
         _sessions.pop(sid, None)
