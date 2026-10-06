@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, make_response, request
@@ -411,7 +412,8 @@ def api_login_submit():
 
 # ---------------- 批量登录（联通机制：按号码隔离，不共享短信会话） ----------------
 
-BATCH_MAX = 20
+BATCH_MAX = 20                 # 单次批量最多多少个号码
+BATCH_WORKERS = 10             # 并发取图形码的路数（纯 I/O，10 路够用且不压垮移动侧）
 
 
 def _batch_row(phone: str, item: dict) -> dict:
@@ -451,19 +453,29 @@ def api_batch_start():
     if not uniq:
         return _attach_sid(jsonify(ok=False, err='没有识别到合法手机号'), sid)
 
+    def fetch(phone: str) -> tuple[str, dict]:
+        lg = PureLogin(log=lambda *a: None, persist=False, egress=s.get('egress'))
+        r = lg.start(phone)
+        return phone, {'login': lg, 'captcha_img': r.get('captcha_img') or '',
+                       'sent_at': 0.0,
+                       'err': '' if r.get('ok') else (r.get('err') or '取码失败'),
+                       'state': 'ready' if r.get('ok') else 'error'}
+
+    todo = []
     rows = []
     for phone in uniq:
         item = s['batch'].get(phone)
         if item and item.get('captcha_img') and item.get('state') != 'done':
-            rows.append(_batch_row(phone, item))
-            continue
-        lg = PureLogin(log=lambda *a: None, persist=False, egress=s.get('egress'))
-        r = lg.start(phone)
-        item = {'login': lg, 'captcha_img': r.get('captcha_img') or '',
-                'sent_at': 0.0, 'err': '' if r.get('ok') else (r.get('err') or '取码失败'),
-                'state': 'ready' if r.get('ok') else 'error'}
-        s['batch'][phone] = item
-        rows.append(_batch_row(phone, item))
+            rows.append(_batch_row(phone, item))   # 已有图形码，不重复取
+        else:
+            todo.append(phone)
+
+    # 20 个号码串行取码要 ~30s，并发 5 路压到 3~6s（每个号码仍是独立会话）
+    if todo:
+        with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as ex:
+            for phone, item in ex.map(fetch, todo):
+                s['batch'][phone] = item
+                rows.append(_batch_row(phone, item))
     return _attach_sid(jsonify(ok=True, rows=rows), sid)
 
 
