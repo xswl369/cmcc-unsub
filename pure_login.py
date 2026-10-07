@@ -96,7 +96,9 @@ class _BindHTTPSConnection(http.client.HTTPSConnection):
                         sock.close()
                     except OSError:
                         pass
-        raise last or OSError('IPv6 connect failed')
+        # v6 源地址路由不通（网络切换后前缀失效等）→ 回退默认连接，
+        # 不让整条登录链路挂掉
+        return super().connect()
 
 
 class _BindHTTPSHandler(urllib.request.HTTPSHandler):
