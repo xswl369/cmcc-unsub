@@ -127,9 +127,7 @@ input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.
     </div>
     <h2>切换账号 <span class="x" id="btnX">✕</span></h2>
 
-    <div class="hint"><strong>在本机获取验证码</strong>：用你的手机打开「中国移动」App 或
-      <a href="https://login.10086.cn/login.html" target="_blank" rel="noreferrer"
-         style="color:var(--blue)">10086.cn 官网</a>，选择短信验证码登录，把收到的验证码填到下面。
+    <div class="hint"><strong>验证码请从 10086.cn 官网获取</strong>：<br>
       短信由你自己的运营商线路发出，本站只负责用「手机号 + 验证码」完成登录。</div>
 
     <div class="field">
@@ -137,61 +135,27 @@ input.code:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,216,.
       <input id="loginPhone" inputmode="numeric" maxlength="11" placeholder="11 位手机号">
     </div>
 
+    <div class="login-actions stack" style="margin-top:-4px">
+      <button id="btnGoOfficial" class="ghost">去 10086.cn 官网取验证码</button>
+    </div>
+
     <div class="field">
-      <label><span class="step">2</span>短信验证码（你自己收到的）</label>
-      <input id="loginSms" inputmode="numeric" maxlength="8" placeholder="手机收到的验证码">
+      <label><span class="step">2</span>网页验证码（10086.cn 官网取的）</label>
+      <input id="loginSms" inputmode="numeric" maxlength="8" placeholder="网页上取的验证码">
     </div>
 
     <div class="login-actions stack">
-      <button id="btnDirect">直接登录</button>
+      <button id="btnDirect">用网页验证码登录</button>
     </div>
 
     <div class="login-status" id="loginStatus"></div>
 
-    <div class="divider"></div>
-    <div class="hint" style="margin-bottom:10px">批量登录：每行 `手机号 验证码`，一次最多 20 条。
-      验证码请在各自手机上分别获取（每台手机取自己号码的码），全部取好后一起粘贴进来。</div>
-    <div class="field">
-      <label>批量「手机号 验证码」</label>
-      <textarea id="batchPhones" rows="4" style="width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:10px;font-size:14px;outline:none;background:#fbfcfd;font-family:inherit" placeholder="13800000001 123456&#10;13800000002 654321"></textarea>
-    </div>
-    <div class="login-actions stack">
-      <button id="btnBatchStart">批量登录并入库</button>
-    </div>
-    <div id="batchList" style="display:flex;flex-direction:column;gap:10px;margin-top:12px"></div>
 
-    <div class="divider"></div>
-    <details id="fallbackBox">
-      <summary style="cursor:pointer;font-size:13px;color:#4a5663;font-weight:500;padding:4px 0">
-        备用：由本站代为发送验证码（走本站出口 IP，可能触发移动风控）</summary>
-      <div style="margin-top:12px">
-        <div class="hint">流程：填手机号 → 填图形码答案 → 发送短信码 → 填短信码 → 登录。</div>
-        <div class="field">
-          <label><span class="step">1</span>图形验证码（算式答案）</label>
-          <div class="captcha-line">
-            <div class="captcha-box" id="captchaBox" title="点击刷新图形码">
-              <img id="captchaImg" alt="图形验证码">
-              <div class="loading" id="captchaLoading"><span class="spin"></span>加载中…</div>
-            </div>
-            <input id="loginCaptcha" inputmode="numeric" maxlength="6" placeholder="填答案">
-          </div>
-        </div>
-        <div class="login-actions stack">
-          <button id="btnSend"><span id="btnSendTxt">发送短信验证码</span></button>
-        </div>
-        <div class="field" id="smsField" style="margin-top:14px;display:none">
-          <label><span class="step">2</span>短信验证码</label>
-          <input id="loginSmsFallback" inputmode="numeric" maxlength="8" placeholder="手机收到的验证码">
-        </div>
-        <div class="login-actions stack">
-          <button id="btnSubmit">登录</button>
-        </div>
-      </div>
-    </details>
+
+
 
     <div class="divider"></div>
     <div class="foot-actions">
-      <button class="ghost small" id="btnReloadCaptcha">重拿图形码（备用通道）</button>
       <button class="ghost small" id="btnCloseLogin">关闭</button>
       <button class="danger small" id="btnLogout">退出登录</button>
     </div>
@@ -303,158 +267,18 @@ async function submitUnsub(i){
 const panel = $('#loginPanel');
 let smsCountdown = 0;
 
-async function loadCaptcha(silent){
-  if (captchaBusy) return;
-  captchaBusy = true;
-  capLoading(true);
-  if (!silent) loginStatus('正在退出旧会话并加载图形码…','wait');
-  const phone = $('#loginPhone').value.trim();
-  const d = await api('/api/login/start', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({phone: /^1\d{10}$/.test(phone) ? phone : undefined})});
-  capLoading(false);
-  captchaBusy = false;
-  if (d.ok && d.captcha_img){
-    $('#captchaImg').src = d.captcha_img;
-    cooldownSend(3);  // 图形码就绪后短暂冷却，防手快
-    loginStatus('图形码已加载。填答案后点「发送短信验证码」。','ok');
-  } else {
-    loginStatus('图形码加载失败：' + (d.err||'未知') + '（点图重试）','err');
-  }
-}
 
-function cooldownSend(sec){
-  const btn = $('#btnSend');
-  const txt = $('#btnSendTxt');
-  smsCountdown = sec;
-  btn.disabled = true;
-  txt.textContent = sec > 0 ? ('发送短信验证码（' + sec + 's）') : '发送短信验证码';
-  if (sec <= 0){ btn.disabled = false; return; }
-  const t = setInterval(()=>{
-    smsCountdown--;
-    if (smsCountdown <= 0){
-      clearInterval(t); btn.disabled = false; txt.textContent = '发送短信验证码';
-    } else txt.textContent = '发送短信验证码（' + smsCountdown + 's）';
-  }, 1000);
-}
-
-function openLogin(){
-  panel.classList.add('show');
-  const p = $('#loginPhone');
-  if (!p.value) p.value = (JSON.parse(localStorage.getItem('cmcc_phone')||'""')) || '';
-  loginStatus('');
-}
-
-// 备用通道的图形码按需加载（展开时才拉），主流程不需要图形码
-let captchaLoaded = false;
-$('#fallbackBox').addEventListener('toggle', ()=>{
-  if ($('#fallbackBox').open && !captchaLoaded){
-    captchaLoaded = true;
-    loadCaptcha();
-  }
-});
-$('#btn-login').onclick = openLogin;
-$('#btnCloseLogin').onclick = ()=>panel.classList.remove('show');
-$('#btnX').onclick = ()=>panel.classList.remove('show');
-$('#captchaBox').onclick = ()=>loadCaptcha(true);
-$('#btnReloadCaptcha').onclick = ()=>loadCaptcha(true);
-
-$('#btnSend').onclick = async ()=>{
-  const phone = $('#loginPhone').value.trim();
-  const captcha = $('#loginCaptcha').value.trim();
-  if (!/^1\d{10}$/.test(phone)){ loginStatus('请输入正确的手机号','err'); return; }
-  localStorage.setItem('cmcc_phone', JSON.stringify(phone));
-  if (!captcha){ loginStatus('请填写图形验证码答案','err'); return; }
-  $('#btnSend').disabled = true;
-  loginStatus('正在发送短信码…','wait');
-  const d = await api('/api/login/send', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({phone, captcha})});
-  if (d.ok){
-    $('#smsField').style.display='block';
-    loginStatus('短信已发送，请查看手机并填入短信验证码，再点「登录」。','ok');
-    cooldownSend(60);
-  } else {
-    $('#btnSend').disabled = false;
-    // 图形码答错时页面会自行换图，必须同步到前端，否则用户看着旧图重试
-    if (d.captcha_img){ $('#captchaImg').src = d.captcha_img; $('#loginCaptcha').value = ''; }
-    loginStatus('发送失败：' + (d.err||'未知') + (d.errs?(' ' + JSON.stringify(d.errs)):''),'err');
-  }
-};
-
-$('#btnSubmit').onclick = async ()=>{
-  const code = $('#loginSmsFallback').value.trim();
-  if (!code){ loginStatus('请填写短信验证码','err'); return; }
-  $('#btnSubmit').disabled = true;
-  loginStatus('正在提交登录…','wait');
-  const d = await api('/api/login/submit', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({code})});
-  $('#btnSubmit').disabled = false;
-  if (d.ok){
-    loginStatus('✔ 登录成功：' + (d.phone || '已登录'),'ok');
-    setTimeout(async ()=>{ panel.classList.remove('show'); await refresh(true); }, 900);
-  } else {
-    loginStatus('登录失败：' + (d.err||'未知') + (d.errs?(' ' + JSON.stringify(d.errs)):''),'err');
-  }
-};
-
-$('#btnLogout').onclick = async ()=>{
-  if (!confirm('确认退出当前登录账号？')) return;
-  loginStatus('正在退出…','wait');
-  await api('/api/login/logout', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-  loginStatus('已退出。点「重拿图形码」可登录新账号。','ok');
-  await loadState();
-};
-
-$('#btn-refresh').onclick = ()=>refresh(true);
-
-// ---------- 账号池 ----------
-async function loadAccounts(){
-  const d = await api('/api/accounts');
-  if (!d.ok) return [];
-  const box = $('#poolList');
-  if (!d.accounts.length){
-    box.innerHTML = '<div style="color:#68737f;font-size:13px">本机还没有已登录账号。完成一次登录后会自动存入本机账号池；其它访客看不到你的号码。</div>';
-    return [];
-  }
-  box.innerHTML = d.accounts.map(a =>
-    '<div style="display:flex;gap:8px;align-items:center;padding:9px 10px;border:1px solid var(--line);border-radius:10px">'
-    + '<span style="font-size:14px;font-weight:600">' + esc(a.phone) + '</span>'
-    + '<span style="font-size:11.5px;color:#68737f">' + new Date(a.updated_at*1000).toLocaleString() + '</span>'
-    + '<span style="flex:1"></span>'
-    + '<button class="small" onclick="useAccount(\'' + a.raw + '\')">使用</button>'
-    + '<button class="ghost small" onclick="delAccount(\'' + a.raw + '\')">移除</button>'
-    + '</div>').join('');
-  return d.accounts;
-}
-async function useAccount(phone){
-  const d = await api('/api/accounts/use', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({phone})});
-  if (!d.ok){ showMsg('切换失败：' + (d.err||'未知'), 'err'); return; }
-  showMsg('已切到 ' + phone + '（' + d.count + ' 项业务）', 'ok');
-  panel.classList.remove('show');
-  await refresh(false);
-}
-async function delAccount(phone){
-  if (!confirm('从账号池移除 ' + phone + '？')) return;
-  await api('/api/accounts/delete', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({phone})});
-  loadAccounts();
-}
-$('#btn-accounts').onclick = async ()=>{
-  panel.classList.add('show');
-  $('#poolPanel').style.display = 'block';
-  await loadAccounts();
-};
-
-// ---------- 直登（用户自带验证码） ----------
-$('#btnDirect').onclick = async ()=>{
+// ---------- 直登（用户在 10086.cn 自己取码） ----------
+async function doDirectLogin(){
   const phone = $('#loginPhone').value.trim();
   const code = $('#loginSms').value.trim();
   if (!/^1\d{10}$/.test(phone)){ loginStatus('请输入正确的手机号','err'); return; }
-  if (!/^\d{4,8}$/.test(code)){ loginStatus('请输入手机上收到的短信验证码','err'); return; }
+  if (!/^\d{4,8}$/.test(code)){ loginStatus('请输入网页验证码','err'); return; }
   localStorage.setItem('cmcc_phone', JSON.stringify(phone));
   $('#btnDirect').disabled = true;
   loginStatus('正在登录…','wait');
-  const d = await api('/api/login/direct', {method:'POST', headers:{'Content-Type':'application/json'},
+  const d = await api('/api/login/direct', {method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({phone, code})});
   $('#btnDirect').disabled = false;
   if (d.ok){
@@ -464,30 +288,22 @@ $('#btnDirect').onclick = async ()=>{
   } else {
     loginStatus('登录失败：' + (d.err||'未知'),'err');
   }
+}
+$('#btnDirect').onclick = doDirectLogin;
+
+// 去官方登录页取验证码（新开标签，取完回来填第 2 栏）
+$('#btnGoOfficial').onclick = ()=>{
+  const phone = ($('#loginPhone').value || '').trim();
+  localStorage.setItem('cmcc_phone', JSON.stringify(phone));
+  const url = 'https://login.10086.cn/login.html?channelID=12003'
+            + '&backUrl=https%3A%2F%2Fshop.10086.cn%2Fi%2F%3Ff%3Dhome';
+  window.open(url, '_blank', 'noopener');
+  loginStatus('已打开官网：选「短信随机码登录」→ 填手机号 → 过图形码 → 取码，然后回来填到第 2 栏。','wait');
 };
 
-// ---------- 批量直登 ----------
-function renderBatchResult(rows){
-  $('#batchList').innerHTML = (rows||[]).map(r =>
-    '<div style="display:flex;gap:8px;align-items:center;border:1px solid var(--line);'
-    + 'border-radius:10px;padding:9px 10px">'
-    + '<strong style="font-size:14px">' + esc(r.phone) + '</strong>'
-    + '<span class="tag ' + (r.ok ? 'ok' : 'no') + '">' + (r.ok ? '已登录' : '失败') + '</span>'
-    + '<span style="flex:1"></span>'
-    + '<span style="font-size:12px;color:#68737f">' + esc(r.err || '') + '</span>'
-    + '</div>').join('');
-}
-$('#btnBatchStart').onclick = async ()=>{
-  const lines = $('#batchPhones').value.trim();
-  if (!lines){ loginStatus('请粘贴「手机号 验证码」','err'); return; }
-  loginStatus('正在批量登录…','wait');
-  const d = await api('/api/batch/direct', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({lines})}, 300000);
-  if (!d.ok){ loginStatus('失败：' + (d.err||'未知'),'err'); return; }
-  renderBatchResult(d.rows);
-  loginStatus('成功 ' + d.ok_count + ' / ' + d.total + '，成功的号码已入账号池。',
-              d.ok_count ? 'ok' : 'err');
-};
+// 回车键：手机号 / 验证码框都触发登录
+$('#loginSms').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') doDirectLogin(); });
+$('#loginPhone').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') $('#loginSms').focus(); });
 
 // 打开页面：已登录→直接进已登录界面；未登录→自动弹出登录面板（等同点「切换账号」）
 async function boot(){

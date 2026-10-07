@@ -350,243 +350,6 @@ def api_accounts_delete():
     return _attach_sid(jsonify(ok=_accounts.remove(phone, s['uid'])), sid)
 
 
-@app.route('/api/login/auto', methods=['POST'])
-def api_login_auto():
-    sid, s = _session()
-    if s['login'].sso_ready():
-        return _attach_sid(jsonify(ok=False, logged_in=True), sid)
-    r = s['login'].start(s['phone'] or CFG['phone'])
-    if not r.get('ok'):
-        return _attach_sid(jsonify(ok=False, err=r.get('err')), sid)
-    return _attach_sid(jsonify(ok=True, captcha_img=r.get('captcha_img')), sid)
-
-
-@app.route('/api/login/start', methods=['POST'])
-def api_login_start():
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    phone = (d.get('phone') or '').strip() or s['phone'] or CFG['phone']
-    if not _ip_allow(_client_ip()):
-        return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
-    r = s['login'].start(phone)
-    if not r.get('ok'):
-        return _attach_sid(jsonify(ok=False, err=r.get('err')), sid)
-    s['phone'], s['items'], s['items_at'] = phone, [], 0.0
-    return _attach_sid(jsonify(ok=True, captcha_img=r.get('captcha_img'),
-                               phone=phone), sid)
-
-
-@app.route('/api/login/send', methods=['POST'])
-def api_login_send():
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    phone = (d.get('phone') or '').strip() or s['phone'] or CFG['phone']
-    captcha = (d.get('captcha') or '').strip()
-    # 按手机号节流（跨会话共享）：同一号码 55 秒内只发一次
-    now = time.time()
-    last = _send_at(phone) or s['send_at']
-    if now - last < 55:
-        left = int(55 - (now - last))
-        return _attach_sid(jsonify(ok=False, err=f'请 {left} 秒后再试'), sid)
-    if not _ip_allow(_client_ip()):
-        return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
-    r = s['login'].send_sms(phone, captcha)
-    if r.get('ok'):
-        s['send_at'] = now
-        s['phone'] = phone
-        _mark_send(phone)
-    return _attach_sid(jsonify(**r), sid)
-
-
-@app.route('/api/login/submit', methods=['POST'])
-def api_login_submit():
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    code = (d.get('code') or '').strip()
-    if not code:
-        return _attach_sid(jsonify(ok=False, err='请输入短信验证码'), sid)
-    phone = s['phone'] or CFG['phone']
-    r = s['login'].submit_code(code)
-    if r.get('ok'):
-        s['phone'] = phone
-        s['items'], s['items_at'] = [], 0.0
-        try:                       # 登录成功 → 落账号池，之后免验证码直接切号
-            _accounts.upsert(phone, s['login'].cookie_items(), owner=s['uid'])
-        except Exception as e:     # noqa: BLE001
-            print('[accounts] save failed:', e)
-    resp = jsonify(**r)
-    _attach_sid(resp, sid)
-    if r.get('ok'):
-        resp.set_cookie(ACCOUNT_COOKIE, phone, max_age=180 * 86400, samesite='Lax')
-    return resp
-
-
-# ---------------- 批量登录（联通机制：按号码隔离，不共享短信会话） ----------------
-
-BATCH_MAX = 20                 # 单次批量最多多少个号码
-BATCH_WORKERS = 10             # 并发取图形码的路数（纯 I/O，10 路够用且不压垮移动侧）
-
-
-def _batch_row(phone: str, item: dict) -> dict:
-    return {'phone': phone, 'state': item.get('state') or 'ready',
-            'captcha_img': item.get('captcha_img') or '',
-            'err': item.get('err') or '',
-            'sent': bool(item.get('sent_at')),
-            'left': max(0, int(55 - (time.time() - item.get('sent_at', 0))))}
-
-
-@app.route('/api/batch/state')
-def api_batch_state():
-    sid, s = _session()
-    rows = [_batch_row(p, it) for p, it in s['batch'].items()]
-    return _attach_sid(jsonify(ok=True, rows=rows), sid)
-
-
-@app.route('/api/batch/start', methods=['POST'])
-def api_batch_start():
-    """粘贴多个手机号：逐个建独立会话并取图形码（不共享 cookie/验证码）。"""
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    raw = d.get('phones')
-    if isinstance(raw, str):
-        phones = re.split(r'[\s,，、;；]+', raw)
-    elif isinstance(raw, list):
-        phones = [str(x) for x in raw]
-    else:
-        phones = []
-    seen, uniq = set(), []
-    for p in phones:
-        p = p.strip()
-        if re.fullmatch(r'1\d{10}', p) and p not in seen:
-            seen.add(p)
-            uniq.append(p)
-    uniq = uniq[:BATCH_MAX]
-    if not uniq:
-        return _attach_sid(jsonify(ok=False, err='没有识别到合法手机号'), sid)
-
-    def fetch(phone: str) -> tuple[str, dict]:
-        lg = PureLogin(log=lambda *a: None, persist=False, egress=s.get('egress'))
-        r = lg.start(phone)
-        return phone, {'login': lg, 'captcha_img': r.get('captcha_img') or '',
-                       'sent_at': 0.0,
-                       'err': '' if r.get('ok') else (r.get('err') or '取码失败'),
-                       'state': 'ready' if r.get('ok') else 'error'}
-
-    todo = []
-    rows = []
-    for phone in uniq:
-        item = s['batch'].get(phone)
-        if item and item.get('captcha_img') and item.get('state') != 'done':
-            rows.append(_batch_row(phone, item))   # 已有图形码，不重复取
-        else:
-            todo.append(phone)
-
-    # 20 个号码串行取码要 ~30s，并发 5 路压到 3~6s（每个号码仍是独立会话）
-    if todo:
-        with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as ex:
-            for phone, item in ex.map(fetch, todo):
-                s['batch'][phone] = item
-                rows.append(_batch_row(phone, item))
-    return _attach_sid(jsonify(ok=True, rows=rows), sid)
-
-
-@app.route('/api/batch/refresh', methods=['POST'])
-def api_batch_refresh():
-    """单个号码重拿图形码（不影响其它号码）。"""
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    phone = (d.get('phone') or '').strip()
-    item = s['batch'].get(phone)
-    if not item:
-        return _attach_sid(jsonify(ok=False, err='该号码不在批量列表中'), sid)
-    img = item['login'].refresh_captcha()
-    item['captcha_img'] = img or item.get('captcha_img') or ''
-    item['state'] = 'ready' if img else 'error'
-    item['err'] = '' if img else '图形码刷新失败'
-    return _attach_sid(jsonify(ok=bool(img), row=_batch_row(phone, item)), sid)
-
-
-@app.route('/api/batch/send', methods=['POST'])
-def api_batch_send():
-    """给某个号码发短信码（图形码 + 风控 token 都在该号码自己的会话里）。"""
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    phone = (d.get('phone') or '').strip()
-    captcha = (d.get('captcha') or '').strip()
-    item = s['batch'].get(phone)
-    if not item:
-        return _attach_sid(jsonify(ok=False, err='该号码不在批量列表中'), sid)
-    last = _send_at(phone) or item.get('sent_at') or 0
-    if time.time() - last < 55:
-        left = int(55 - (time.time() - last))
-        return _attach_sid(jsonify(ok=False, err=f'该号码 {left} 秒后可再发'), sid)
-    if not _ip_allow(_client_ip()):
-        return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
-    r = item['login'].send_sms(phone, captcha)
-    if r.get('ok'):
-        item['sent_at'], item['state'], item['err'] = time.time(), 'sent', ''
-        _mark_send(phone)
-    else:
-        item['state'], item['err'] = 'error', r.get('err') or '发送失败'
-        if r.get('captcha_img'):
-            item['captcha_img'] = r['captcha_img']
-    out = dict(r)
-    out['row'] = _batch_row(phone, item)
-    return _attach_sid(jsonify(**out), sid)
-
-
-@app.route('/api/batch/submit', methods=['POST'])
-def api_batch_submit():
-    """提交短信码；成功即把 cookie 写入账号池。"""
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    phone = (d.get('phone') or '').strip()
-    code = (d.get('code') or '').strip()
-    item = s['batch'].get(phone)
-    if not item:
-        return _attach_sid(jsonify(ok=False, err='该号码不在批量列表中'), sid)
-    if not code:
-        return _attach_sid(jsonify(ok=False, err='请输入短信验证码'), sid)
-    r = item['login'].submit_code(code)
-    if r.get('ok'):
-        item['state'], item['err'] = 'done', ''
-        try:
-            _accounts.upsert(phone, item['login'].cookie_items(), owner=s['uid'])
-        except Exception as e:     # noqa: BLE001
-            print('[accounts] batch save failed:', e)
-    else:
-        item['state'], item['err'] = 'error', r.get('err') or '登录失败'
-        if r.get('captcha_img'):
-            item['captcha_img'] = r['captcha_img']
-    out = dict(r)
-    out['row'] = _batch_row(phone, item)
-    return _attach_sid(jsonify(**out), sid)
-
-
-@app.route('/api/batch/use', methods=['POST'])
-def api_batch_use():
-    """把批量里登录成功的号码设为当前操作账号。"""
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    phone = (d.get('phone') or '').strip()
-    item = s['batch'].get(phone)
-    if not item or item.get('state') != 'done':
-        acc = _accounts.get(phone, s['uid'])
-        if not acc:
-            return _attach_sid(jsonify(ok=False, err='该号码尚未登录成功'), sid)
-        s['login'] = PureLogin(log=lambda *a: None, persist=False,
-                               egress=s.get('egress'),
-                               cookie_items=acc['cookies'])
-    s['login'], s['phone'] = item['login'], phone
-    s['items'], s['items_at'] = [], 0.0
-    try:
-        with s['lock']:
-            items = _items(s)
-    except Exception as e:     # noqa: BLE001
-        return _attach_sid(jsonify(ok=False, err=str(e)[:150]), sid)
-    return _attach_sid(jsonify(ok=True, phone=phone, count=len(items)), sid)
-
-
 # ---------------- 直登（用户自带验证码，本站不发码） ----------------
 #
 # 发短信这一步发生在用户自己的手机/网络上（他自己的 IP），本站只接收
@@ -596,51 +359,39 @@ def api_batch_use():
 PHONE_CODE_RE = re.compile(r'^1\d{10}$')
 
 
-def _parse_pairs(raw) -> list[tuple[str, str]]:
-    """解析「手机号 验证码」列表，每行一条，支持空格/逗号/制表符分隔。"""
-    if isinstance(raw, str):
-        lines = raw.splitlines()
-    elif isinstance(raw, list):
-        lines = [str(x) for x in raw]
-    else:
-        lines = []
-    out, seen = [], set()
-    for line in lines:
-        parts = [p.strip() for p in re.split(r'[\s,，、;；|]+', line.strip()) if p.strip()]
-        if len(parts) < 2:
-            continue
-        phone = next((p for p in parts if PHONE_CODE_RE.match(p)), '')
-        code = next((p for p in parts if p != phone and p.isdigit() and 4 <= len(p) <= 8), '')
-        if phone and code and phone not in seen:
-            seen.add(phone)
-            out.append((phone, code))
-    return out
-
-
 def _direct_login(s: dict, phone: str, code: str, egress=None) -> dict:
     """用手机号+短信码登录，成功后写入账号池。
 
-    egress 为空时用会话默认出口；批量场景会按号码各分一个出口，
-    避免一整批登录全从同一个 IP 出去。
+    码由用户在自己的浏览器（自己的 IP）上从 10086.cn 获取，
+    本站只负责用「手机号 + 码」完成 login.htm 这一步。
+    任何网络异常都收敛成 {'ok': False, 'err': ...}，不让调用方冒 500。
     """
-    lg = PureLogin(log=lambda *a: None, persist=False,
-                   egress=egress if egress is not None else s.get('egress'))
-    r = lg.start_direct(phone)
-    if not r.get('ok'):
-        return {'phone': phone, 'ok': False, 'err': r.get('err')}
-    out = lg.submit_code(code)
-    if not out.get('ok'):
-        return {'phone': phone, 'ok': False, 'err': out.get('err')}
     try:
-        _accounts.upsert(phone, lg.cookie_items(), owner=s['uid'])
-    except Exception as e:      # noqa: BLE001
-        print('[accounts] direct save failed:', e)
-    return {'phone': phone, 'ok': True, 'login': lg}
+        lg = PureLogin(log=lambda *a: None, persist=False,
+                       egress=egress if egress is not None else s.get('egress'))
+        r = lg.start_direct(phone)
+        if not r.get('ok'):
+            return {'phone': phone, 'ok': False,
+                    'err': r.get('err') or '登录页连接失败'}
+        out = lg.submit_code(code)
+        if not out.get('ok'):
+            print('[direct] %s server said: %r' % (phone, out), flush=True)
+            return {'phone': phone, 'ok': False,
+                    'err': out.get('err') or '登录失败'}
+        try:
+            _accounts.upsert(phone, lg.cookie_items(), owner=s['uid'])
+        except Exception as e:      # noqa: BLE001
+            print('[accounts] direct save failed:', e)
+        return {'phone': phone, 'ok': True, 'login': lg}
+    except Exception as e:          # noqa: BLE001
+        print('[direct] %s failed: %r' % (phone, e))
+        return {'phone': phone, 'ok': False,
+                'err': '网络异常，请重试（%s）' % type(e).__name__}
 
 
 @app.route('/api/login/direct', methods=['POST'])
 def api_login_direct():
-    """本站不发码：用户自己在手机上取码，这里用手机号+短信码登录。"""
+    """本站不发码：用户自己在 10086.cn 取码，这里用手机号+码登录。"""
     sid, s = _session()
     d = request.get_json(force=True, silent=True) or {}
     phone = (d.get('phone') or '').strip()
@@ -652,9 +403,12 @@ def api_login_direct():
     if not _ip_allow(_client_ip()):
         return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
 
+    _t0 = time.time()
     r = _direct_login(s, phone, code)
+    print('[direct] %s ok=%s %.1fs err=%s' % (
+        phone, r['ok'], time.time() - _t0, r.get('err') or ''), flush=True)
     if not r['ok']:
-        return _attach_sid(jsonify(ok=False, err=r['err']), sid)
+        return _attach_sid(jsonify(ok=False, err=r.get('err') or '登录失败'), sid)
 
     s['login'], s['phone'] = r['login'], phone
     s['items'], s['items_at'] = [], 0.0
@@ -671,32 +425,6 @@ def api_login_direct():
     _attach_sid(resp, sid)
     resp.set_cookie(ACCOUNT_COOKIE, phone, max_age=180 * 86400, samesite='Lax')
     return resp
-
-
-@app.route('/api/batch/direct', methods=['POST'])
-def api_batch_direct():
-    """批量直登：粘贴「手机号 验证码」多行，一次全部登录并入库。"""
-    sid, s = _session()
-    d = request.get_json(force=True, silent=True) or {}
-    pairs = _parse_pairs(d.get('lines'))
-    if not pairs:
-        return _attach_sid(jsonify(ok=False, err='没有识别到「手机号 验证码」组合'), sid)
-    pairs = pairs[:BATCH_MAX]
-    if not _ip_allow(_client_ip()):
-        return _attach_sid(jsonify(ok=False, err='操作过于频繁，请稍后再试'), sid)
-
-    def work(item):
-        phone, code = item
-        eg = _pool.pick('%s|%s' % (s['uid'], phone))   # 每个号码一个出口
-        r = _direct_login(s, phone, code, egress=eg)
-        return {'phone': phone, 'ok': r['ok'], 'err': r.get('err') or ''}
-
-    rows = []
-    with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as ex:
-        for row in ex.map(work, pairs):
-            rows.append(row)
-    ok_n = sum(1 for r in rows if r['ok'])
-    return _attach_sid(jsonify(ok=True, rows=rows, ok_count=ok_n, total=len(rows)), sid)
 
 
 @app.route('/api/login/logout', methods=['POST'])

@@ -20,6 +20,7 @@ LOGDIR=$HOME/cmcc-logs
 LOG=$LOGDIR/guard.log
 PIDF=$LOGDIR/guard.pid
 IFACE_FILE=$HOME/.cmcc_iface
+STATE_FILE=$HOME/.cmcc_pool_state
 DNS_PY=$HOME/dns_forward.py
 CF_BIN=$HOME/cf_2025.bin
 CF_CFG=$HOME/.cloudflared/config.yml
@@ -65,6 +66,43 @@ PY
 
 port_open() { (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
 
+# v6 出口是否真能出网：拿一个本机 v6 源地址连 login.10086.cn 的 v6 地址
+# 能连上 → 0；连不上/超时/无地址 → 1
+v6_egress_ok() {
+  local ifc="$1"
+  [ -n "$ifc" ] || return 1
+  su -c "$PREFIX/bin/python3 - <<'PY'
+import socket, ssl, subprocess, sys
+iface = '$ifc'
+out = subprocess.run(['ip','-6','addr','show','dev',iface,'scope','global'],
+                     capture_output=True, text=True).stdout
+src = ''
+for line in out.splitlines():
+    line = line.strip()
+    if line.startswith('inet6 ') and 'tentative' not in line:
+        src = line.split()[1].split('/')[0]
+        break
+if not src:
+    sys.exit(1)
+dst = '2409:8080:381c:f1c1::3:8a'   # login.10086.cn
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.settimeout(4)
+try:
+    s.bind((src, 0))
+    s.connect((dst, 443))
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.wrap_socket(s, server_hostname='login.10086.cn')
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+finally:
+    try: s.close()
+    except Exception: pass
+PY" >/dev/null 2>&1
+}
+
 # ---------- 1) IPv6 出口池 ----------
 v6_count() {   # $1=iface
   su -c "ip -6 addr show dev $1 scope global 2>/dev/null | grep -c inet6" 2>/dev/null | tr -d ' \r'
@@ -88,6 +126,10 @@ write_pool_cfg() {   # $1=iface
     > "$APP_DATA/ip_pool.json"
 }
 
+write_pool_cfg_off() {   # v6 出口不可用：关掉池子，全部走默认线路(v4)
+  printf '{"ipv6":{"enabled":false},"proxies":[],"strategy":"sid"}' > "$APP_DATA/ip_pool.json"
+}
+
 ensure_ipv6() {
   local ifc n cur
   ifc=$(detect_iface)
@@ -101,11 +143,26 @@ ensure_ipv6() {
     log "ipv6 refill on $ifc (had $n)"
   fi
 
-  cur=$(cat "$IFACE_FILE" 2>/dev/null)
-  if [ "$ifc" != "$cur" ]; then
+  # 出口健康：v6 连不通就关掉池子（退回 v4），通了才启用
+  local state="disabled"
+  if v6_egress_ok "$ifc"; then
+    state="enabled"
+  fi
+
+  want="$ifc|$state"
+  if [ "$want" != "$(cat $STATE_FILE 2>/dev/null)" ]; then
     echo "$ifc" > "$IFACE_FILE"
-    write_pool_cfg "$ifc"
-    log "iface changed -> $ifc, pool config rewritten, restarting gunicorn"
+    if [ "$state" = "enabled" ]; then
+      write_pool_cfg "$ifc"
+    else
+      write_pool_cfg_off
+    fi
+    echo "$want" > "$STATE_FILE"
+    if [ "$state" = "enabled" ]; then
+      log "v6 egress OK on $ifc -> pool enabled ($want), restarting gunicorn"
+    else
+      log "v6 egress unusable on $ifc -> pool disabled, fallback to v4 ($want), restarting gunicorn"
+    fi
     return 2      # 通知调用方重启 gunicorn
   fi
   return 0

@@ -35,6 +35,8 @@ DEFAULT_CFG = {
     },
     'proxies': [],        # C 方案：['socks5://user:pass@host:port', ...]
     'strategy': 'sid',    # sid=按访客一致性分配 | round=轮询
+    # D 方案：多上行网卡（每张卡一个真实公网 IP）
+    'uplinks': [],        # ['wlan0', 'ccmni1', ...]
 }
 
 _lock = threading.Lock()
@@ -109,15 +111,16 @@ def _load_cfg():
 
 
 class Egress:
-    """一个出口：要么源地址绑定，要么代理。"""
+    """一个出口：代理 / IPv6 源地址 / 网卡绑定（三选一）。"""
 
-    __slots__ = ('label', 'src_addr', 'iface', 'proxy', 'born')
+    __slots__ = ('label', 'src_addr', 'iface', 'proxy', 'born', 'bind_iface')
 
-    def __init__(self, label, src_addr='', iface='', proxy=''):
+    def __init__(self, label, src_addr='', iface='', proxy='', bind_iface=''):
         self.label = label
         self.src_addr = src_addr
         self.iface = iface
         self.proxy = proxy
+        self.bind_iface = bind_iface      # 绑这个网卡出网（多上行 IP）
         self.born = time.time()
 
     @property
@@ -125,7 +128,8 @@ class Egress:
         return bool(self.proxy)
 
     def __repr__(self):
-        kind = 'proxy' if self.is_proxy else self.src_addr
+        kind = ('proxy:' + self.proxy if self.is_proxy
+                else (self.src_addr or ('iface:' + self.bind_iface)))
         return '<Egress %s %s>' % (self.label, kind)
 
 
@@ -222,6 +226,18 @@ class IPPool:
             self.log('[ippool] 代理出口 %d 个' % len(out))
         return out
 
+    # ---------- 多上行网卡（D） ----------
+
+    def _build_uplinks(self):
+        out = []
+        for i, iface in enumerate(self.cfg.get('uplinks') or []):
+            if isinstance(iface, str) and iface.strip():
+                out.append(Egress('up-%d' % i, iface=iface.strip(),
+                                  bind_iface=iface.strip()))
+        if out:
+            self.log('[ippool] 上行网卡出口 %d 个' % len(out))
+        return out
+
     # ---------- 对外 ----------
 
     def _rebuild(self):
@@ -230,7 +246,8 @@ class IPPool:
             for addr in self._added_addrs:
                 _addr_change('del', addr, iface)
             self._added_addrs = []
-            self._egresses = self._build_ipv6() + self._build_proxies()
+            self._egresses = (self._build_uplinks() + self._build_ipv6()
+                              + self._build_proxies())
             self._built_at = time.time()
 
     def egresses(self):
@@ -260,7 +277,8 @@ class IPPool:
         pool = self.egresses()
         return {
             'total': len(pool),
-            'ipv6': len([e for e in pool if not e.is_proxy]),
+            'uplink': len([e for e in pool if e.bind_iface]),
+            'ipv6': len([e for e in pool if e.src_addr and not e.is_proxy]),
             'proxy': len([e for e in pool if e.is_proxy]),
             'sample': [e.label for e in pool[:5]],
         }
